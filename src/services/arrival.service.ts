@@ -12,6 +12,7 @@ import {
   TRTC_LINES,
   findLineByInput,
   inferLinesByStationAndDest,
+  isShortTurnTrain,
   isStationOnLine,
   resolveEffectiveDestinations,
   type TrtcLineDefinition,
@@ -155,6 +156,16 @@ export function validateArrivalQuery(params: RawArrivalQueryParams): ValidatedAr
     );
   }
 
+  // 防呆：若查詢區間終點站，但所在車站已超過該區間終點站（下游車站），避免誤導搭乘反方向
+  if (directionRule.validOriginStations && !directionRule.validOriginStations.has(station)) {
+    throw new AppError(
+      400,
+      'INVALID_ORIGIN_FOR_SHORT_TURN',
+      directionRule.invalidOriginMessage ??
+        `車站「${station}」已超過區間終點站「${dest}」，無此方向列車停靠`,
+    );
+  }
+
   const effectiveDestinations = resolveEffectiveDestinations(
     lineDef,
     station,
@@ -286,7 +297,7 @@ function projectTrainsFromSnapshot(
       lineCode: query.line,
       lineName: query.lineName,
       destination: record.destination,
-      isShortTurn: record.destination !== query.dest,
+      isShortTurn: isShortTurnTrain(query.line, query.station, query.dest, record.destination),
       rawCountDown: record.rawCountDown,
       initialSeconds: record.initialSeconds,
       remainingSeconds,

@@ -181,6 +181,69 @@ describe('Direction Mapping, Short-Turn Merging & Line Disambiguation', () => {
     ).toThrowError(AppError);
   });
 
+  it('automatically includes full-line trains regardless of includeShortTurn when querying short-turn terminals (e.g. 台北車站/東門 -> 大安)', async () => {
+    // 即使不帶 includeShortTurn（預設 false），查 dest=大安 也應同時給「大安站 + 廣慈/奉天宮站」，且正確標記 isShortTurn
+    const withoutFlag = await service.queryArrivals({
+      line: 'R',
+      station: '東門',
+      dest: '大安',
+    });
+    expect(withoutFlag.query.effectiveDestinations).toEqual(['大安站', '廣慈/奉天宮站']);
+    expect(withoutFlag.trains).toEqual([
+      expect.objectContaining({
+        destination: '大安站',
+        isShortTurn: true,
+        remainingSeconds: 37,
+      }),
+      expect.objectContaining({
+        destination: '廣慈/奉天宮站',
+        isShortTurn: false,
+        remainingSeconds: 310,
+      }),
+    ]);
+
+    // 查 BL 忠孝復興 -> 昆陽（無 flag）也自動納入南港展覽館全程車
+    const blKunyang = await service.queryArrivals({
+      line: 'BL',
+      station: '忠孝復興',
+      dest: '昆陽',
+      includeShortTurn: 'false',
+    });
+    expect(blKunyang.query.effectiveDestinations).toEqual(['昆陽站', '南港展覽館站']);
+    expect(blKunyang.trains.map((t) => ({ dest: t.destination, isShortTurn: t.isShortTurn }))).toEqual([
+      { dest: '昆陽站', isShortTurn: true },
+      { dest: '南港展覽館站', isShortTurn: false },
+    ]);
+
+    // 其他區間終點（北投、台電大樓、亞東醫院）驗證
+    expect(
+      validateArrivalQuery({ line: 'R', station: '台北車站', dest: '北投' }).effectiveDestinations,
+    ).toEqual(['北投站', '淡水站']);
+    expect(
+      validateArrivalQuery({ line: 'R', station: '新北投', dest: '北投' }).effectiveDestinations,
+    ).toEqual(['北投站']);
+    expect(
+      validateArrivalQuery({ line: 'G', station: '古亭', dest: '台電大樓' }).effectiveDestinations,
+    ).toEqual(['台電大樓站', '新店站']);
+    expect(
+      validateArrivalQuery({ line: 'BL', station: '台北車站', dest: '亞東醫院' }).effectiveDestinations,
+    ).toEqual(['亞東醫院站', '頂埔站']);
+  });
+
+  it('prevents wrong-way queries when already past a short-turn terminal (e.g. 信義安和查往大安、關渡查往北投)', () => {
+    expect(() =>
+      validateArrivalQuery({ line: 'R', station: '信義安和', dest: '大安' }),
+    ).toThrowError(AppError);
+
+    expect(() =>
+      validateArrivalQuery({ line: 'R', station: '關渡', dest: '北投' }),
+    ).toThrowError(AppError);
+
+    expect(() =>
+      validateArrivalQuery({ line: 'G', station: '公館', dest: '台電大樓' }),
+    ).toThrowError(AppError);
+  });
+
   it('rejects Circular Line (Y) queries as unsupported', () => {
     expect(() =>
       validateArrivalQuery({

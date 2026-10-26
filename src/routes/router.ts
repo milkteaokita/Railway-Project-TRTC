@@ -9,7 +9,7 @@
 
 import { SnapshotCacheManager } from '../cache/snapshot-cache';
 import { SERVICE_METADATA, resolveRuntimeConfig } from '../config/constants';
-import { O_LINE_SHARED_TRUNK_MERGE_STATIONS, TRTC_LINES } from '../config/trtc-network';
+import { TRTC_LINES } from '../config/trtc-network';
 import { TrtcSoapProvider } from '../providers/trtc-soap.provider';
 import { ArrivalService } from '../services/arrival.service';
 import type { Env, RuntimeConfig } from '../types/env';
@@ -104,10 +104,13 @@ function handleListLines(ctx: RouteContext): Response {
     directions: line.directions.map((dir) => ({
       terminal: dir.terminal,
       description: dir.description,
+      ...(dir.alwaysIncludeDestinations && dir.alwaysIncludeDestinations.length > 0
+        ? { alwaysIncludeDestinations: dir.alwaysIncludeDestinations }
+        : {}),
       shortTurnDestinations: dir.shortTurnDestinations,
       ...(dir.shortTurnApplicableStations
         ? {
-            shortTurnApplicableStations: [...O_LINE_SHARED_TRUNK_MERGE_STATIONS],
+            shortTurnApplicableStations: [...dir.shortTurnApplicableStations],
           }
         : {}),
     })),

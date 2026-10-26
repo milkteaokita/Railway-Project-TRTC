@@ -6,28 +6,45 @@
  * 1. 若未來新增路線（例如環狀線成環營運啟用 `Y`、萬大線 `LG`）：
  *    只需於 `TRTC_LINES` 調整 `supported: true` 並補上 `directions` 規則即可，無須修改核心快取或服務層邏輯。
  * 2. 若新增或變更區間車終點站：
- *    直接於對應路線的 `directions[].shortTurnDestinations` 陣列擴充即可。
+ *    直接於對應路線的 `directions` 設定 `shortTurnDestinations`（查全程終點且開啟 flag 時納入）
+ *    以及區間終點本身的 `alwaysIncludeDestinations`（查區間終點時無條件納入同向全程車）。
  */
 
 import type { RawTrtcTrackItem, SupportedTrtcLineCode, TrtcLineCode } from '../types/arrival';
 import { normalizeStationName } from '../utils/station';
 
 /**
- * 單一營運方向與區間車合併規則定義
+ * 單一營運方向與區間車／全程車合併規則定義
  */
 export interface DirectionRule {
-  /** 查詢指定之目標終點站（標準帶「站」格式，例如 `"淡水站"`） */
+  /** 查詢指定之目標終點站（標準帶「站」格式，例如 `"淡水站"` 或 `"大安站"`） */
   terminal: string;
   /** 方向描述（供文件與 `/api/lines` 元資料端點說明） */
   description: string;
   /**
-   * 當 `includeShortTurn=true` 時一併納入同向合併排序的區間車／共線支線終點站清單。
+   * 無論 `includeShortTurn` 為 `true` 或 `false`，一律自動合併納入的同向全程車終點站清單。
+   * 適用情境：當查詢區間車終點站（如 `大安站`、`北投站`、`台電大樓站`、`昆陽站`、`亞東醫院站`）時，
+   * 同方向的全程車必定會停靠該站，因此預設一併回傳。
+   */
+  alwaysIncludeDestinations?: readonly string[];
+  /**
+   * 選填：僅當查詢車站位於此集合內時，才套用 `alwaysIncludeDestinations`（例如新北投支線折返北投站時不納入淡水站）。
+   */
+  alwaysIncludeApplicableStations?: ReadonlySet<string>;
+  /**
+   * 選填：限制允許查詢此 `terminal` 的有效起點車站集合（防止在已過區間終點站的下游車站誤查反方向）。
+   */
+  validOriginStations?: ReadonlySet<string>;
+  /** 當查詢站不在 `validOriginStations` 內時回傳的引導提示訊息 */
+  invalidOriginMessage?: string;
+  /**
+   * 當 `includeShortTurn=true` 時額外納入同向合併排序的區間車／共線支線終點站清單。
    * 註：程式執行時會自動過濾 `destination === 當前查詢車站` 的清客不載客列車。
    */
   shortTurnDestinations: readonly string[];
   /**
    * 選填：僅當查詢車站位於此集合內時，才允許套用 `shortTurnDestinations` 合併。
-   * 用於中和新蘆線 (O)「民權西路站～南勢角站」共線段規則（大橋頭與分線段不合併）。
+   * 例如中和新蘆線 (O)「民權西路站～南勢角站」共線段規則（大橋頭與分線段不合併）。
    */
   shortTurnApplicableStations?: ReadonlySet<string>;
 }
@@ -48,11 +65,120 @@ export interface TrtcLineDefinition {
   unsupportedReason?: string;
   /** 該路線所屬全數車站（正規化帶「站」字尾） */
   stations: readonly string[];
+  /** 該路線屬於「區間車終點站」的站名集合（用於正確標記回傳列車的 `isShortTurn` 屬性） */
+  shortTurnTerminals: ReadonlySet<string>;
   /** 支援查詢的方向與區間車映射清單 */
   directions: readonly DirectionRule[];
   /** 已停用／變更之舊終點站提示映射（例如象山站延伸至廣慈/奉天宮站） */
   deprecatedTerminals?: Readonly<Record<string, string>>;
 }
+
+// ============================================================================
+// 路線主線有序車站定義與區間切片工具（避免手動維護站名清單產生遺漏）
+// ============================================================================
+
+function stationsBefore(orderedStations: readonly string[], pivotStation: string): Set<string> {
+  const idx = orderedStations.indexOf(pivotStation);
+  return new Set(idx > 0 ? orderedStations.slice(0, idx) : []);
+}
+
+function stationsAfter(orderedStations: readonly string[], pivotStation: string): Set<string> {
+  const idx = orderedStations.indexOf(pivotStation);
+  return new Set(idx >= 0 ? orderedStations.slice(idx + 1) : []);
+}
+
+/** 淡水信義線主線有序車站（由南至北：R01 廣慈/奉天宮站 -> R28 淡水站） */
+const R_MAIN_SOUTH_TO_NORTH = [
+  '廣慈/奉天宮站',
+  '象山站',
+  '台北101/世貿站',
+  '信義安和站',
+  '大安站',
+  '大安森林公園站',
+  '東門站',
+  '中正紀念堂站',
+  '台大醫院站',
+  '台北車站',
+  '中山站',
+  '雙連站',
+  '民權西路站',
+  '圓山站',
+  '劍潭站',
+  '士林站',
+  '芝山站',
+  '明德站',
+  '石牌站',
+  '唭哩岸站',
+  '奇岩站',
+  '北投站',
+  '復興崗站',
+  '忠義站',
+  '關渡站',
+  '竹圍站',
+  '紅樹林站',
+  '淡水站',
+] as const;
+
+/** 松山新店線主線有序車站（由南至北：G01 新店站 -> G19 松山站） */
+const G_MAIN_SOUTH_TO_NORTH = [
+  '新店站',
+  '新店區公所站',
+  '七張站',
+  '大坪林站',
+  '景美站',
+  '萬隆站',
+  '公館站',
+  '台電大樓站',
+  '古亭站',
+  '中正紀念堂站',
+  '小南門站',
+  '西門站',
+  '北門站',
+  '中山站',
+  '松江南京站',
+  '南京復興站',
+  '台北小巨蛋站',
+  '南京三民站',
+  '松山站',
+] as const;
+
+/** 板南線全線有序車站（由西至東：BL01 頂埔站 -> BL23 南港展覽館站） */
+const BL_WEST_TO_EAST = [
+  '頂埔站',
+  '永寧站',
+  '土城站',
+  '海山站',
+  '亞東醫院站',
+  '府中站',
+  '板橋站',
+  '新埔站',
+  '江子翠站',
+  '龍山寺站',
+  '西門站',
+  '台北車站',
+  '善導寺站',
+  '忠孝新生站',
+  '忠孝復興站',
+  '忠孝敦化站',
+  '國父紀念館站',
+  '市政府站',
+  '永春站',
+  '後山埤站',
+  '昆陽站',
+  '南港站',
+  '南港展覽館站',
+] as const;
+
+// 各區間終點站之上游有效區間集合
+const R_SOUTH_OF_BEITOU = stationsBefore(R_MAIN_SOUTH_TO_NORTH, '北投站'); // 廣慈/奉天宮站 ～ 奇岩站
+const R_VALID_FOR_BEITOU_DEST: ReadonlySet<string> = new Set([
+  ...R_SOUTH_OF_BEITOU,
+  '新北投站',
+]);
+const R_NORTH_OF_DAAN = stationsAfter(R_MAIN_SOUTH_TO_NORTH, '大安站'); // 大安森林公園站 ～ 淡水站
+const G_NORTH_OF_TAIPOWER = stationsAfter(G_MAIN_SOUTH_TO_NORTH, '台電大樓站'); // 古亭站 ～ 松山站
+const BL_WEST_OF_KUNYANG = stationsBefore(BL_WEST_TO_EAST, '昆陽站'); // 頂埔站 ～ 後山埤站
+const BL_EAST_OF_FAR_EASTERN = stationsAfter(BL_WEST_TO_EAST, '亞東醫院站'); // 府中站 ～ 南港展覽館站
 
 /**
  * 中和新蘆線 (O) 允許透過 `includeShortTurn=true` 合併「往迴龍 / 往蘆洲」的共線區間車站（民權西路站～南勢角站，共 11 站）。
@@ -81,6 +207,7 @@ export const TRTC_LINES: Readonly<Record<TrtcLineCode, TrtcLineDefinition>> = {
     name: '文湖線',
     aliases: ['BR', '文湖線', '文湖', '棕線'],
     supported: true,
+    shortTurnTerminals: new Set(),
     stations: [
       '動物園站',
       '木柵站',
@@ -126,51 +253,39 @@ export const TRTC_LINES: Readonly<Record<TrtcLineCode, TrtcLineDefinition>> = {
     name: '淡水信義線',
     aliases: ['R', '淡水信義線', '淡水信義', '紅線', '新北投支線'],
     supported: true,
-    stations: [
-      '廣慈/奉天宮站',
-      '象山站',
-      '台北101/世貿站',
-      '信義安和站',
-      '大安站',
-      '大安森林公園站',
-      '東門站',
-      '中正紀念堂站',
-      '台大醫院站',
-      '台北車站',
-      '中山站',
-      '雙連站',
-      '民權西路站',
-      '圓山站',
-      '劍潭站',
-      '士林站',
-      '芝山站',
-      '明德站',
-      '石牌站',
-      '唭哩岸站',
-      '奇岩站',
-      '北投站',
-      '新北投站',
-      '復興崗站',
-      '忠義站',
-      '關渡站',
-      '竹圍站',
-      '紅樹林站',
-      '淡水站',
-    ],
+    shortTurnTerminals: new Set(['北投站', '大安站']),
+    stations: [...R_MAIN_SOUTH_TO_NORTH, '新北投站'],
     directions: [
       {
         terminal: '淡水站',
-        description: '往淡水方向（北向，區間車終點為北投站）',
+        description: '往淡水方向（北向；開啟 includeShortTurn 可合併往北投區間車）',
         shortTurnDestinations: ['北投站'],
+        shortTurnApplicableStations: R_VALID_FOR_BEITOU_DEST,
       },
       {
         terminal: '廣慈/奉天宮站',
-        description: '往廣慈/奉天宮方向（南向，區間車終點為大安站）',
+        description: '往廣慈/奉天宮方向（南向；開啟 includeShortTurn 可合併往大安區間車）',
         shortTurnDestinations: ['大安站'],
+        shortTurnApplicableStations: R_NORTH_OF_DAAN,
       },
       {
         terminal: '北投站',
-        description: '往北投方向（新北投支線折返或指定查詢北投區間車）',
+        description: '往北投方向（北向區間終點／新北投支線折返；於主線自動包含往淡水全程車）',
+        alwaysIncludeDestinations: ['淡水站'],
+        alwaysIncludeApplicableStations: R_SOUTH_OF_BEITOU,
+        validOriginStations: R_VALID_FOR_BEITOU_DEST,
+        invalidOriginMessage:
+          '查詢車站位於「北投站」以北，無北上往北投列車；若欲南下前往北投站，請改查詢 dest=廣慈/奉天宮（或 dest=大安）。',
+        shortTurnDestinations: [],
+      },
+      {
+        terminal: '大安站',
+        description: '往大安方向（南向區間終點；自動包含往廣慈/奉天宮全程車）',
+        alwaysIncludeDestinations: ['廣慈/奉天宮站'],
+        alwaysIncludeApplicableStations: R_NORTH_OF_DAAN,
+        validOriginStations: R_NORTH_OF_DAAN,
+        invalidOriginMessage:
+          '查詢車站位於「大安站」以南（或支線），無南下往大安列車；若欲北上前往大安站，請改查詢 dest=淡水 或 dest=北投。',
         shortTurnDestinations: [],
       },
       {
@@ -178,14 +293,10 @@ export const TRTC_LINES: Readonly<Record<TrtcLineCode, TrtcLineDefinition>> = {
         description: '往新北投方向（新北投支線）',
         shortTurnDestinations: [],
       },
-      {
-        terminal: '大安站',
-        description: '往大安方向（指定查詢大安區間車）',
-        shortTurnDestinations: [],
-      },
     ],
     deprecatedTerminals: {
-      象山站: '淡水信義線南向終點站已延伸變更為「廣慈/奉天宮站」，不再支援以「象山站」作為終點查詢，請改用 dest=廣慈/奉天宮。',
+      象山站:
+        '淡水信義線南向終點站已延伸變更為「廣慈/奉天宮站」，不再支援以「象山站」作為終點查詢，請改用 dest=廣慈/奉天宮。',
     },
   },
 
@@ -194,28 +305,8 @@ export const TRTC_LINES: Readonly<Record<TrtcLineCode, TrtcLineDefinition>> = {
     name: '松山新店線',
     aliases: ['G', '松山新店線', '松山新店', '綠線', '小碧潭支線'],
     supported: true,
-    stations: [
-      '新店站',
-      '新店區公所站',
-      '七張站',
-      '小碧潭站',
-      '大坪林站',
-      '景美站',
-      '萬隆站',
-      '公館站',
-      '台電大樓站',
-      '古亭站',
-      '中正紀念堂站',
-      '小南門站',
-      '西門站',
-      '北門站',
-      '中山站',
-      '松江南京站',
-      '南京復興站',
-      '台北小巨蛋站',
-      '南京三民站',
-      '松山站',
-    ],
+    shortTurnTerminals: new Set(['台電大樓站']),
+    stations: [...G_MAIN_SOUTH_TO_NORTH, '小碧潭站'],
     directions: [
       {
         terminal: '松山站',
@@ -224,12 +315,18 @@ export const TRTC_LINES: Readonly<Record<TrtcLineCode, TrtcLineDefinition>> = {
       },
       {
         terminal: '新店站',
-        description: '往新店方向（南向，區間車終點為台電大樓站）',
+        description: '往新店方向（南向；開啟 includeShortTurn 可合併往台電大樓區間車）',
         shortTurnDestinations: ['台電大樓站'],
+        shortTurnApplicableStations: G_NORTH_OF_TAIPOWER,
       },
       {
         terminal: '台電大樓站',
-        description: '往台電大樓方向（指定查詢台電大樓區間車）',
+        description: '往台電大樓方向（南向區間終點；自動包含往新店全程車）',
+        alwaysIncludeDestinations: ['新店站'],
+        alwaysIncludeApplicableStations: G_NORTH_OF_TAIPOWER,
+        validOriginStations: G_NORTH_OF_TAIPOWER,
+        invalidOriginMessage:
+          '查詢車站位於「台電大樓站」以南，無南下往台電大樓列車；若欲北上前往台電大樓站，請改查詢 dest=松山。',
         shortTurnDestinations: [],
       },
       {
@@ -250,6 +347,7 @@ export const TRTC_LINES: Readonly<Record<TrtcLineCode, TrtcLineDefinition>> = {
     name: '中和新蘆線',
     aliases: ['O', '中和新蘆線', '中和新蘆', '橘線'],
     supported: true,
+    shortTurnTerminals: new Set(),
     stations: [
       '南勢角站',
       '景安站',
@@ -304,50 +402,39 @@ export const TRTC_LINES: Readonly<Record<TrtcLineCode, TrtcLineDefinition>> = {
     name: '板南線',
     aliases: ['BL', '板南線', '板南', '藍線'],
     supported: true,
-    stations: [
-      '頂埔站',
-      '永寧站',
-      '土城站',
-      '海山站',
-      '亞東醫院站',
-      '府中站',
-      '板橋站',
-      '新埔站',
-      '江子翠站',
-      '龍山寺站',
-      '西門站',
-      '台北車站',
-      '善導寺站',
-      '忠孝新生站',
-      '忠孝復興站',
-      '忠孝敦化站',
-      '國父紀念館站',
-      '市政府站',
-      '永春站',
-      '後山埤站',
-      '昆陽站',
-      '南港站',
-      '南港展覽館站',
-    ],
+    shortTurnTerminals: new Set(['昆陽站', '亞東醫院站']),
+    stations: [...BL_WEST_TO_EAST],
     directions: [
       {
         terminal: '南港展覽館站',
-        description: '往南港展覽館方向（東向，區間車終點為昆陽站）',
+        description: '往南港展覽館方向（東向；開啟 includeShortTurn 可合併往昆陽區間車）',
         shortTurnDestinations: ['昆陽站'],
+        shortTurnApplicableStations: BL_WEST_OF_KUNYANG,
       },
       {
         terminal: '頂埔站',
-        description: '往頂埔方向（西向，區間車終點為亞東醫院站）',
+        description: '往頂埔方向（西向；開啟 includeShortTurn 可合併往亞東醫院區間車）',
         shortTurnDestinations: ['亞東醫院站'],
+        shortTurnApplicableStations: BL_EAST_OF_FAR_EASTERN,
       },
       {
         terminal: '昆陽站',
-        description: '往昆陽方向（指定查詢昆陽區間車）',
+        description: '往昆陽方向（東向區間終點；自動包含往南港展覽館全程車）',
+        alwaysIncludeDestinations: ['南港展覽館站'],
+        alwaysIncludeApplicableStations: BL_WEST_OF_KUNYANG,
+        validOriginStations: BL_WEST_OF_KUNYANG,
+        invalidOriginMessage:
+          '查詢車站位於「昆陽站」以東，無東向往昆陽列車；若欲西向前往昆陽站，請改查詢 dest=頂埔 或 dest=亞東醫院。',
         shortTurnDestinations: [],
       },
       {
         terminal: '亞東醫院站',
-        description: '往亞東醫院方向（指定查詢亞東醫院區間車）',
+        description: '往亞東醫院方向（西向區間終點；自動包含往頂埔全程車）',
+        alwaysIncludeDestinations: ['頂埔站'],
+        alwaysIncludeApplicableStations: BL_EAST_OF_FAR_EASTERN,
+        validOriginStations: BL_EAST_OF_FAR_EASTERN,
+        invalidOriginMessage:
+          '查詢車站位於「亞東醫院站」以西，無西向往亞東醫院列車；若欲東向前往亞東醫院站，請改查詢 dest=南港展覽館 或 dest=昆陽。',
         shortTurnDestinations: [],
       },
     ],
@@ -358,6 +445,7 @@ export const TRTC_LINES: Readonly<Record<TrtcLineCode, TrtcLineDefinition>> = {
     name: '環狀線',
     aliases: ['Y', '環狀線', '環狀', '黃線'],
     supported: false,
+    shortTurnTerminals: new Set(),
     unsupportedReason: '環狀線 (Y) 目前尚未成環營運，本服務暫不開放查詢（僅支援 BR, R, G, O, BL）。',
     stations: [
       '大坪林站',
@@ -442,7 +530,6 @@ export function isStationOnLine(lineCode: TrtcLineCode, normalizedStation: strin
 
 /**
  * 當呼叫端未傳入 `line` 時，依據 `(station, dest)` 自動推斷唯一所屬路線。
- * 若在「忠孝復興站 / 南港展覽館站」查詢 `dest=南港展覽館站`，會回傳多筆候選 `['BR', 'BL']`，由服務層要求呼叫端明確指定 `line`。
  */
 export function inferLinesByStationAndDest(
   normalizedStation: string,
@@ -468,16 +555,29 @@ export function inferLinesByStationAndDest(
 }
 
 /**
+ * 判定一筆列車是否應標記為區間車／非指定支線列車 (`isShortTurn`)：
+ * - 在 R / G / BL 線：依據列車實際終點站是否屬於該路線之區間終點站（如北投、大安、台電大樓、昆陽、亞東醫院）判定，
+ *   因此即使使用者查詢 `dest=大安`，往「廣慈/奉天宮站」的全程車仍正確標示 `isShortTurn: false`，往「大安站」則為 `isShortTurn: true`
+ *   （特例：新北投支線於「新北投站」開往「北投站」之折返車為支線全程車，`isShortTurn: false`）。
+ * - 在 O 線共線段：當合併「迴龍站 / 蘆洲站」雙支線時，與使用者指定 `queryDest` 不同的另一支線標記為 `true`。
+ */
+export function isShortTurnTrain(
+  lineCode: SupportedTrtcLineCode,
+  queryStation: string,
+  queryDest: string,
+  trainDestination: string,
+): boolean {
+  if (lineCode === 'O') {
+    return trainDestination !== queryDest;
+  }
+  if (lineCode === 'R' && queryStation === '新北投站' && trainDestination === '北投站') {
+    return false;
+  }
+  return TRTC_LINES[lineCode].shortTurnTerminals.has(trainDestination);
+}
+
+/**
  * 推斷北捷上游單筆原始資料所屬之路線代碼（解決上游無 Line 欄位及「忠孝復興 → 南港展覽館」BL/BR 撞名問題）。
- *
- * 判定優先順序：
- * 1. `DestinationName` 若為單一路線專屬終點站（涵蓋 99% 班次），直接對應。
- * 2. 若 `DestinationName === "南港展覽館站"`（唯一由 `BR` 與 `BL` 共用的終點站）：
- *    a. 若 `StationName` 僅存在於 `BL`（如台北車站、忠孝敦化站、市政府站等），必為 `BL`。
- *    b. 若 `StationName` 僅存在於 `BR`（如大安站、南京復興站、松山機場站等），必為 `BR`。
- *    c. 若 `StationName` 同時存在於兩線（如轉乘站 `忠孝復興站`）：
- *       - 板南線 (BL) 行駛中列車皆有 3 碼 `TrainNumber`（如 `"205"`），非空即為 `BL`。
- *       - 文湖線 (BR) 全線皆無車次號（`TrainNumber === ""`），且在原始陣列中前後相鄰車站為文湖線車站（如南京復興站、大安站），可精準判定為 `BR`。
  */
 export function inferRecordLineCode(
   station: string,
@@ -502,7 +602,6 @@ export function inferRecordLineCode(
       return 'BL';
     }
 
-    // 若恰逢未帶車次號，透過原始陣列相鄰紀錄之專屬站名輔助判定
     const prevStation = rawArray[index - 1]
       ? normalizeStationName(rawArray[index - 1]!.StationName)
       : '';
@@ -529,17 +628,32 @@ export function inferRecordLineCode(
 /**
  * 依據路線、查詢車站、目標終點站與 `includeShortTurn` 計算實際應納入篩選的終點站清單。
  * 已內建：
- * 1. 中和新蘆線 (O) 共線段限制（僅民權西路站～南勢角站合併迴龍／蘆洲）。
- * 2. 清客防呆（自動排除 `DestinationName === 當前查詢車站` 的區間終點車）。
+ * 1. 查詢區間終點站（如 `大安`、`北投`、`台電大樓`、`昆陽`、`亞東醫院`）時，不論 `includeShortTurn` 為何，無條件納入同向全程車終點站。
+ * 2. 中和新蘆線 (O) 共線段限制（僅民權西路站～南勢角站合併迴龍／蘆洲）。
+ * 3. 清客防呆（自動排除 `DestinationName === 當前查詢車站` 的區間終點車）。
  */
 export function resolveEffectiveDestinations(
-  lineDef: TrtcLineDefinition,
+  _lineDef: TrtcLineDefinition,
   normalizedStation: string,
   directionRule: DirectionRule,
   includeShortTurn: boolean,
 ): string[] {
   const destinations = new Set<string>([directionRule.terminal]);
 
+  // 1. 無論 flag 為何皆自動納入的同向全程車（如查往大安時自動納入廣慈/奉天宮）
+  if (directionRule.alwaysIncludeDestinations && directionRule.alwaysIncludeDestinations.length > 0) {
+    const isEligible =
+      !directionRule.alwaysIncludeApplicableStations ||
+      directionRule.alwaysIncludeApplicableStations.has(normalizedStation);
+
+    if (isEligible) {
+      for (const mainDest of directionRule.alwaysIncludeDestinations) {
+        destinations.add(mainDest);
+      }
+    }
+  }
+
+  // 2. 當 includeShortTurn=true 時額外納入的同向區間車／共線支線
   if (includeShortTurn && directionRule.shortTurnDestinations.length > 0) {
     const isStationEligible =
       !directionRule.shortTurnApplicableStations ||
@@ -552,7 +666,7 @@ export function resolveEffectiveDestinations(
     }
   }
 
-  // 邊界防呆：若某區間車（甚至主終點站）即為當前查詢車站，列車進站後僅清客不載客，予以排除
+  // 3. 邊界防呆：若某區間車（或終點站）即為當前查詢車站，列車進站後僅清客不載客，予以排除
   destinations.delete(normalizedStation);
 
   return [...destinations];
