@@ -1,0 +1,6 @@
+# 複製此檔案並重新命名為 .dev.vars 供本機 wrangler dev 使用
+# 正式環境請使用 `npx wrangler secret put <KEY>` 設定
+
+TRTC_API_URL="https://your-trtc-endpoint.example.com/TrackInfo.asmx"
+TRTC_API_USERNAME="your_username_here"
+TRTC_API_PASSWORD="your_password_here"

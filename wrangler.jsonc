@@ -1,0 +1,32 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "railway-project-trtc",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "observability": {
+    "enabled": true
+  },
+
+  /**
+   * 非機密的執行期參數設定（可公開於 GitHub）
+   * 敏感資訊（TRTC_API_URL, TRTC_API_USERNAME, TRTC_API_PASSWORD）請勿寫在此處：
+   * - 本機開發：設定於 .dev.vars
+   * - 正式環境：使用 `npx wrangler secret put <KEY>` 設定
+   */
+  "vars": {
+    "CACHE_MAX_AGE_SECONDS": "45",
+    "ARRIVING_DEFAULT_SECONDS": "10",
+    "MIN_REFETCH_INTERVAL_SECONDS": "5",
+    "UPSTREAM_TIMEOUT_MS": "8000"
+  }
+
+  /**
+   * 正式環境綁定自訂網域範例（啟用 Cloudflare Edge Cache API `caches.default` 必備）：
+   * "routes": [
+   *   {
+   *     "pattern": "trtc-api.example.com",
+   *     "custom_domain": true
+   *   }
+   * ]
+   */
+}

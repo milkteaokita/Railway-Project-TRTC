@@ -1,0 +1,20 @@
+# Dependencies
+node_modules/
+
+# Cloudflare Wrangler & Local Secrets (NEVER commit)
+.wrangler/
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+.env
+.env.*
+!.env.example
+
+# Build & Test output
+dist/
+coverage/
+
+# OS & Editor files
+.DS_Store
+Thumbs.db
+*.log

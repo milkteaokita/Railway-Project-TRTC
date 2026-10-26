@@ -1,0 +1,21 @@
+{
+  "name": "railway-project-trtc",
+  "version": "1.0.0",
+  "description": "台北捷運 (TRTC) 即時到站 API 代理、區間車方向合併與動態倒數快取服務 (Cloudflare Workers)",
+  "private": false,
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261019.1",
+    "typescript": "^5.7.3",
+    "vitest": "^3.0.5",
+    "wrangler": "^4.0.0"
+  }
+}
