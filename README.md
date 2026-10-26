@@ -213,3 +213,4 @@ npm run dev
 1. **啟用新路線或修改區間車規則**：編輯 `src/config/trtc-network.ts` 中的 `TRTC_LINES` 註冊表（例如環狀線成環營運時，將 `Y.supported` 改為 `true` 並填入 `directions` 即可自動對外生效）。
 2. **串接新上游資料源（如車廂擁擠度、TDX 備援或其他軌道系統）**：實作 `src/types/arrival.ts` 中的 `TrackDataProvider` 介面，即可直接重用 `SnapshotCacheManager` 雙層快取與併發鎖機制。
 3. **新增 API 路由端點**：於 `src/routes/router.ts` 的 `ROUTE_DEFINITIONS` 新增一筆路由定義，根路徑 `GET /` 將自動同步更新端點導覽說明。
+
