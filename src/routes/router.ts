@@ -10,8 +10,11 @@
 import { SnapshotCacheManager } from '../cache/snapshot-cache';
 import { SERVICE_METADATA, resolveRuntimeConfig } from '../config/constants';
 import { TRTC_LINES } from '../config/trtc-network';
+import { buildV2LinesMetadata } from '../config/trtc-network-v2';
 import { TrtcSoapProvider } from '../providers/trtc-soap.provider';
 import { ArrivalService } from '../services/arrival.service';
+import { ArrivalV2Service } from '../services/arrival-v2.service';
+import type { V2LinesApiResponse } from '../types/arrival-v2';
 import type { Env, RuntimeConfig } from '../types/env';
 import { AppError, buildCommonHeaders, errorResponse, jsonResponse } from '../utils/http';
 
@@ -164,6 +167,56 @@ async function handleQueryArrivals(ctx: RouteContext): Promise<Response> {
 }
 
 /**
+ * 處理 `GET /api/v2/lines`：輸出 API v2 依行駛方向設計之路網、方向說明與各車站可選方向清單
+ */
+function handleListLinesV2(ctx: RouteContext): Response {
+  const payload: V2LinesApiResponse = {
+    ok: true,
+    apiVersion: 'v2',
+    system: 'TRTC',
+    lines: buildV2LinesMetadata(),
+  };
+
+  return jsonResponse(payload, 200, ctx.config.corsAllowOrigin, {
+    'Cache-Control': 'public, max-age=3600',
+  });
+}
+
+/**
+ * 處理 `GET /api/v2/arrivals`：API v2 依路線行駛方向查詢即時到站倒數（無 Flag，直接回傳同向全數列車）
+ */
+async function handleQueryArrivalsV2(ctx: RouteContext): Promise<Response> {
+  const provider = new TrtcSoapProvider({
+    apiUrl: ctx.env.TRTC_API_URL,
+    username: ctx.env.TRTC_API_USERNAME,
+    password: ctx.env.TRTC_API_PASSWORD,
+    arrivingDefaultSeconds: ctx.config.arrivingDefaultSeconds,
+    timeoutMs: ctx.config.upstreamTimeoutMs,
+  });
+
+  const cacheManager = new SnapshotCacheManager(provider, {
+    executionCtx: ctx.executionCtx,
+  });
+
+  const arrivalV2Service = new ArrivalV2Service({
+    cacheManager,
+    config: ctx.config,
+  });
+
+  const searchParams = ctx.url.searchParams;
+  const result = await arrivalV2Service.queryArrivals({
+    line: searchParams.get('line'),
+    station: searchParams.get('station'),
+    direction: searchParams.get('direction'),
+    dest: searchParams.get('dest'),
+  });
+
+  return jsonResponse(result, 200, ctx.config.corsAllowOrigin, {
+    'Cache-Control': 'no-store',
+  });
+}
+
+/**
  * 全域路由註冊表
  */
 export const ROUTE_DEFINITIONS: readonly RouteDefinition[] = [
@@ -183,15 +236,29 @@ export const ROUTE_DEFINITIONS: readonly RouteDefinition[] = [
   },
   {
     method: 'GET',
+    path: '/api/v2/lines',
+    summary: '[v2] 取得依行駛方向分組之北捷路線、方向清單與各車站可用方向',
+    example: '/api/v2/lines',
+    handler: handleListLinesV2,
+  },
+  {
+    method: 'GET',
+    path: '/api/v2/arrivals',
+    summary: '[v2] 依路線、車站與行駛方向查詢即時到站倒數（直接提供同向全數列車，無須 Flag）',
+    example: '/api/v2/arrivals?line=R&station=台北車站&direction=淡水',
+    handler: handleQueryArrivalsV2,
+  },
+  {
+    method: 'GET',
     path: '/api/lines',
-    summary: '取得台北捷運支援路線、車站清單與區間車合併規則設定',
+    summary: '[v1 舊版保留] 取得台北捷運支援路線、車站清單與區間車合併規則設定',
     example: '/api/lines',
     handler: handleListLines,
   },
   {
     method: 'GET',
     path: '/api/arrivals',
-    summary: '查詢指定路線、車站與終點方向之即時列車到站倒數（支援同向區間車合併）',
+    summary: '[v1 舊版保留] 查詢指定路線、車站與終點方向之即時列車到站倒數（支援同向區間車合併）',
     example: '/api/arrivals?line=R&station=大安&dest=淡水&includeShortTurn=true',
     handler: handleQueryArrivals,
   },

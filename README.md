@@ -39,30 +39,124 @@ Railway-Project-TRTC/
 │   ├── index.ts                      # Cloudflare Worker 進入點
 │   ├── config/
 │   │   ├── constants.ts              # 服務識別資訊與執行期預設參數
-│   │   └── trtc-network.ts           # 北捷路網設定檔（車站清單、終點方向、區間車映射規則）
+│   │   ├── trtc-network-v2.ts        # [v2] 依行駛方向分組之路網與各站可用方向設定
+│   │   └── trtc-network.ts           # [v1 保留] 舊版路網與區間車 Flag 規則設定
 │   ├── providers/
 │   │   └── trtc-soap.provider.ts     # 北捷 SOAP 請求組裝與 JSON+XML 混合格式解析器
 │   ├── cache/
 │   │   └── snapshot-cache.ts         # L1 Isolate + Single-Flight + L2 Cache API 雙層快取管理
 │   ├── services/
-│   │   └── arrival.service.ts        # 驗證、區間車合併、動態秒數推算與重抓決策邏輯
+│   │   ├── arrival-v2.service.ts     # [v2] 方向導向到站查詢服務（無 Flag，與 v1 共用底層快取）
+│   │   └── arrival.service.ts        # [v1 保留] 舊版到站查詢服務
 │   ├── routes/
-│   │   └── router.ts                 # 宣告式路由表（/, /health, /api/lines, /api/arrivals）
+│   │   └── router.ts                 # 宣告式路由表（/, /health, /api/v2/*, /api/*）
 │   ├── types/
 │   │   ├── env.ts                    # Worker Env 與機密變數型別定義
-│   │   └── arrival.ts                # 領域資料結構與抽象 TrackDataProvider 介面
+│   │   ├── arrival-v2.ts             # [v2] 方向導向回應與路網型別定義
+│   │   └── arrival.ts                # 共用快照型別、TrackDataProvider 介面與 v1 型別
 │   └── utils/
 │       ├── http.ts                   # 統一 JSON / CORS / AppError 回應工具
 │       ├── station.ts                # 站名正規化（「台北車站」防呆）與倒數字串解析
 │       └── xml.ts                    # SOAP XML 特殊字元跳脫工具
-├── test/                             # Vitest 單元與整合測試
+├── test/                             # Vitest 單元與整合測試（涵蓋 v1 與 v2）
 ├── .dev.vars.example                 # 本機環境變數範本（不含真實網址與憑證）
 └── wrangler.jsonc                    # Cloudflare Workers 部署設定
 ```
 
 ---
 
-## 支援路線與區間車合併規則
+## API 端點總覽
+
+| 方法 | 路徑 | 版本 | 說明 |
+| :--- | :--- | :---: | :--- |
+| `GET` | `/` | 共用 | 服務身分資訊、支援路線摘要與所有可用端點導覽 |
+| `GET` | `/health` | 共用 | 檢查服務狀態與上游憑證環境變數是否已配置（不暴露機密內容） |
+| `GET` | `/api/v2/lines` | **v2 (推薦)** | 取得依「行駛方向」分組之路網設定與**每一站可選方向清單** |
+| `GET` | `/api/v2/arrivals` | **v2 (推薦)** | 依路線、車站與行駛方向查詢即時到站倒數（無須 Flag，直接提供同向全數列車） |
+| `GET` | `/api/lines` | v1 (舊版保留) | 舊版路網設定與區間車 Flag 規則（相容既有串接，未來可能下線） |
+| `GET` | `/api/arrivals` | v1 (舊版保留) | 舊版指定終點站 + `includeShortTurn` 查詢端點 |
+
+> **快取共享說明**：`v1` 與 `v2` 底層共用同一份 `SnapshotCacheManager` 全系統快照快取，兩版本混用不會增加上游北捷 API 呼叫次數。
+
+---
+
+## API v2 設計與方向規則（推薦使用）
+
+`v2` 移除 `includeShortTurn` Flag，改以**實際月台行駛方向**為查詢單位，直接回傳該方向所有會進站的列車（由前端依每班車的 `destination` 呈現終點站名稱），並自動依所在車站區段過濾反方向列車與終點清客車：
+
+| 路線代碼 | 路線名稱 | 支援方向 (`direction`) | 回傳列車終點 (`destination`) 規則 | 各站方向特殊規則 |
+| :--- | :--- | :--- | :--- | :--- |
+| `BR` | 文湖線 | `南港展覽館`、`動物園` | 依方向回傳往 `南港展覽館站` 或 `動物園站` | 於 `忠孝復興站` 自動與 `BL` 區分 |
+| `R` | 淡水信義線 | `淡水`、`廣慈/奉天宮` | • **`淡水方向`**：回傳 `淡水站`、`北投站`、`新北投站`（於北投站）<br>• **`廣慈/奉天宮方向`**：回傳 `廣慈/奉天宮站`、`大安站`、`北投站`（於新北投站及北投以北回機廠班次） | `新北投站` 提供 `廣慈/奉天宮方向`（回傳折返北投列車） |
+| `G` | 松山新店線 | `松山`、`新店`、`小碧潭`、`七張` | • **`新店方向`**：回傳 `新店站`、`台電大樓站`<br>• **`松山方向`**：僅 `松山站`<br>• **`小碧潭方向`**：`小碧潭站`<br>• **`七張方向`**：`七張站` | • `七張站` 提供 `松山`、`新店`、`小碧潭` 三方向<br>• `小碧潭站` 僅提供 `七張` 方向 |
+| `O` | 中和新蘆線 | `迴龍`、`蘆洲`、`南勢角` | • **共線段（`南勢角站 ～ 大橋頭站` 含大橋頭）**：查 `迴龍` 或 `蘆洲` 皆直接回傳 `迴龍站 + 蘆洲站` 全部北上列車<br>• **分線段**：各自僅回傳該支線列車 | 新莊分線各站僅開放 `迴龍 / 南勢角`；蘆洲分線各站僅開放 `蘆洲 / 南勢角` |
+| `BL` | 板南線 | `南港展覽館`、`頂埔` | • **`南港展覽館方向`**：回傳 `南港展覽館站`、`昆陽站`（及土城段往亞東醫院）<br>• **`頂埔方向`**：回傳 `頂埔站`、`亞東醫院站`（及南港段往昆陽） | 於 `忠孝復興站` 自動透過車次與鄰站特徵與 `BR` 區分 |
+
+### `GET /api/v2/arrivals` 查詢參數
+
+| 參數 | 必填 | 範例 | 說明 |
+| :--- | :---: | :--- | :--- |
+| `line` | 建議提供 | `R` 或 `淡水信義線` | 路線代碼或名稱（於 `忠孝復興` 查 `南港展覽館方向` 必填以區分 `BL` / `BR`）。 |
+| `station` | **必填** | `台北車站` 或 `七張` | 查詢車站名稱（支援自動補「站」、`北車` 別名與 `臺`→`台` 正規化）。 |
+| `direction` | **必填** | `淡水` 或 `淡水方向` | 行駛方向（支援輸入 `淡水`、`淡水站`、`淡水方向`、`往淡水`，亦相容舊參數名 `dest`）。 |
+
+### `v2` 回應範例
+
+`GET /api/v2/arrivals?line=R&station=台北車站&direction=淡水`
+
+```json
+{
+  "ok": true,
+  "apiVersion": "v2",
+  "system": "TRTC",
+  "query": {
+    "line": "R",
+    "lineName": "淡水信義線",
+    "station": "台北車站",
+    "direction": "淡水站",
+    "directionLabel": "淡水方向",
+    "matchedDestinations": [
+      "淡水站",
+      "北投站"
+    ]
+  },
+  "cache": {
+    "hit": true,
+    "status": "HIT",
+    "layer": "L2_EDGE",
+    "fetchedAt": "2026-10-28T13:50:00.000Z",
+    "elapsedSeconds": 8
+  },
+  "trains": [
+    {
+      "trainNumber": "131",
+      "lineCode": "R",
+      "lineName": "淡水信義線",
+      "destination": "北投站",
+      "isShortTurn": true,
+      "rawCountDown": "01:30",
+      "initialSeconds": 90,
+      "remainingSeconds": 82,
+      "sourceTime": "2026-10-28 21:50:00"
+    },
+    {
+      "trainNumber": "101",
+      "lineCode": "R",
+      "lineName": "淡水信義線",
+      "destination": "淡水站",
+      "isShortTurn": false,
+      "rawCountDown": "04:00",
+      "initialSeconds": 240,
+      "remainingSeconds": 232,
+      "sourceTime": "2026-10-28 21:50:00"
+    }
+  ]
+}
+```
+
+---
+
+## API v1 說明（舊版相容保留）
 
 > 註：環狀線（`Y`）因目前尚未成環營運，暫不開放查詢（設定檔已預留結構，未來成環可直接啟用）。
 
@@ -74,80 +168,14 @@ Railway-Project-TRTC/
 | `O` | 中和新蘆線 | `南勢角`、`迴龍`、`蘆洲` | 查 `迴龍` ↔ 開啟 `includeShortTurn=true` 時合併 `蘆洲` | **僅限 `民權西路站 ～ 南勢角站` 共 11 站區間有效**；`大橋頭站` 與兩條分線段內不合併 |
 | `BL` | 板南線 | 全程：`南港展覽館`、`頂埔`<br>區間：`昆陽`、`亞東醫院` | • 查全程終點：開啟 `includeShortTurn=true` 時納入 `昆陽` / `亞東醫院`<br>• **查區間終點（`昆陽` / `亞東醫院`）：不論有無帶 flag，預設一律合併同向全程車** | 於 `忠孝復興站` 自動透過車次與鄰站特徵與 `BR` 區分 |
 
-- **清客列車防呆**：當使用者所在查詢站即為區間車終點站（例如人在 `大安站` 查往 `廣慈/奉天宮` 並開啟 `includeShortTurn=true`），系統會自動剔除 `DestinationName === "大安站"` 的清客不載客列車。
-
----
-
-## API 端點說明
-
-| 方法 | 路徑 | 說明 |
-| :--- | :--- | :--- |
-| `GET` | `/` | 服務身分資訊、支援路線摘要與所有可用端點導覽 |
-| `GET` | `/health` | 檢查服務狀態與上游憑證環境變數是否已配置（不暴露機密內容） |
-| `GET` | `/api/lines` | 取得完整路網設定、各線車站清單與區間車合併規則 |
-| `GET` | `/api/arrivals` | 查詢即時列車到站倒數與區間車合併結果 |
-
-### `GET /api/arrivals` 查詢參數
+### `GET /api/arrivals` (v1) 查詢參數
 
 | 參數 | 必填 | 範例 | 說明 |
 | :--- | :---: | :--- | :--- |
-| `line` | 建議提供 | `R` 或 `淡水信義線` | 路線代碼或中文名稱。若省略且該站與終點站組合唯一，系統會自動推斷；若於 `忠孝復興` 查 `南港展覽館` 則必須提供以區分 `BL` / `BR`。 |
-| `station` | **必填** | `大安` 或 `大安站` | 查詢車站名稱（自動正規化補齊「站」字，並內建 `台北車站` / `北車` / `臺`→`台` 轉換防呆）。 |
+| `line` | 建議提供 | `R` 或 `淡水信義線` | 路線代碼或中文名稱。 |
+| `station` | **必填** | `大安` 或 `大安站` | 查詢車站名稱。 |
 | `dest` | **必填** | `淡水` | 目標終點站名稱。 |
 | `includeShortTurn` | 選填 | `true` / `false` | 預設 `false`。設為 `true` 時將同向區間車納入並依剩餘秒數由小到大合併排序。 |
-
-### 回應範例
-
-`GET /api/arrivals?line=R&station=大安&dest=淡水&includeShortTurn=true`
-
-```json
-{
-  "ok": true,
-  "system": "TRTC",
-  "query": {
-    "line": "R",
-    "lineName": "淡水信義線",
-    "station": "大安站",
-    "dest": "淡水站",
-    "includeShortTurn": true,
-    "effectiveDestinations": [
-      "淡水站",
-      "北投站"
-    ]
-  },
-  "cache": {
-    "hit": true,
-    "status": "HIT",
-    "layer": "L2_EDGE",
-    "fetchedAt": "2026-10-26T13:24:43.642Z",
-    "elapsedSeconds": 12
-  },
-  "trains": [
-    {
-      "trainNumber": "",
-      "lineCode": "R",
-      "lineName": "淡水信義線",
-      "destination": "北投站",
-      "isShortTurn": true,
-      "rawCountDown": "01:23",
-      "initialSeconds": 83,
-      "remainingSeconds": 71,
-      "sourceTime": "2026-10-26 21:24:36"
-    },
-    {
-      "trainNumber": "102",
-      "lineCode": "R",
-      "lineName": "淡水信義線",
-      "destination": "淡水站",
-      "isShortTurn": false,
-      "rawCountDown": "04:49",
-      "initialSeconds": 289,
-      "remainingSeconds": 277,
-      "sourceTime": "2026-10-26 21:24:36"
-    }
-  ]
-}
-```
 
 ---
 

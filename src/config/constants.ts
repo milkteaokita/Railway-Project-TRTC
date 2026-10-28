@@ -9,7 +9,7 @@ import type { Env, RuntimeConfig } from '../types/env';
 export const SERVICE_METADATA = {
   name: 'railway-project-trtc',
   title: '台北捷運 (TRTC) 即時到站動態快取與區間車整合代理 API',
-  version: '1.0.0',
+  version: '1.2.0',
   system: 'TRTC',
   runtime: 'Cloudflare Workers',
 } as const;
