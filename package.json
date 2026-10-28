@@ -1,6 +1,6 @@
 {
   "name": "railway-project-trtc",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "台北捷運 (TRTC) 即時到站 API 代理、區間車方向合併與動態倒數快取服務 (Cloudflare Workers)",
   "private": false,
   "license": "MIT",
